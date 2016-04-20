@@ -113,7 +113,7 @@ angular.module('greenWalletMnemonicsServices', ['greenWalletServices'])
                     }
                 }, function(fail) {
                     console.log('mnemonic.toSeed failed: ' + fail)
-                }, "BIP39", "calcSeed", [k, m]);
+                }, "BIP38", "calcSeed", [k, m]);
             })();
         } else {
             var worker = new Worker(BASE_URL+"/static/js/greenwallet/mnemonics/mnemonic_seed_worker.js");

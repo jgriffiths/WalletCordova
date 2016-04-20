@@ -3,248 +3,235 @@ package it.greenaddress.cordova;
 import org.apache.cordova.*;
 import org.json.JSONArray;
 import org.json.JSONException;
-import java.nio.charset.Charset;
-import com.bitsofproof.supernode.common.Hash;
-import com.bitsofproof.supernode.common.ECKeyPair;
-import com.bitsofproof.supernode.common.ValidationException;
-import com.bitsofproof.supernode.wallet.KeyFormatter;
-import com.bitsofproof.supernode.api.Network;
-
+import com.blockstream.libwally.Wally;
 import java.io.UnsupportedEncodingException;
-import java.security.GeneralSecurityException;
-import java.security.NoSuchAlgorithmException;
-import java.security.InvalidKeyException;
-import javax.crypto.BadPaddingException;
-import javax.crypto.Cipher;
-import javax.crypto.IllegalBlockSizeException;
-import javax.crypto.NoSuchPaddingException;
-import javax.crypto.spec.SecretKeySpec;
-import com.lambdaworks.crypto.SCrypt;
+import java.util.concurrent.ExecutorService;
 
-public class BIP38 extends CordovaPlugin 
+import static com.blockstream.libwally.Wally.BIP38_SERIALISED_LEN;
+import static com.blockstream.libwally.Wally.BIP38_KEY_MAINNET;
+import static com.blockstream.libwally.Wally.BIP38_KEY_TESTNET;
+import static com.blockstream.libwally.Wally.BIP38_KEY_COMPRESSED;
+import static com.blockstream.libwally.Wally.BIP38_KEY_RAW_MODE;
+import static com.blockstream.libwally.Wally.BIP38_KEY_SWAP_ORDER;
+
+public class BIP38 extends CordovaPlugin
 {
+    // Syntactic sugar
+    protected void runAsync(final Runnable task) {
+        cordova.getThreadPool().execute(task);
+    }
 
-    private Network coinToNetwork(final String cur_coin, final CallbackContext callbackContext) {
-        if (cur_coin.equals("BTC")) return Network.PRODUCTION;
-        else if (cur_coin.equals("BTT")) return Network.TEST;
-        else {
-            final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "InvalidNetwork");
-            callbackContext.sendPluginResult(result);
-            return null;
+    // Syntactic sugar for returning an error
+    protected static void setError(final CallbackContext cb, final String error) {
+        cb.sendPluginResult(new PluginResult(PluginResult.Status.ERROR, error));
+    }
+
+    private static void setError(final CallbackContext cb, final Throwable e) {
+
+        String error = "Unknown error";
+        if (e instanceof IllegalArgumentException) {
+            error = "Invalid argument";
+        } else if (e instanceof OutOfMemoryError) {
+            error = "Out of memory";
+        } else if (e instanceof RuntimeException) {
+            error = "Failed";
+        } else if (e instanceof UnsupportedEncodingException) {
+            error = "Invalid character encoding";
         }
+        setError(cb, error);
+    };
+
+
+    // Syntactic sugar for returning string data
+    protected static void setString(final CallbackContext cb, final String result) {
+        cb.sendPluginResult(new PluginResult(PluginResult.Status.OK, result));
+    }
+
+    // Syntactic sugar for returning binary data
+    protected static void setBytes(final CallbackContext cb, final byte[] src, int start, int end) {
+        final JSONArray j = new JSONArray();
+        for (int i = start; i < end; i++) {
+            int ubyte = src[i];
+            ubyte &= 0xFF;
+            j.put(ubyte);
+        }
+        cb.sendPluginResult(new PluginResult(PluginResult.Status.OK, j));
+    }
+
+    // Get bytes from JS into Java format
+    protected static byte[] getBytes(final JSONArray args, int n, int expected) throws JSONException {
+        final JSONArray j = args.getJSONArray(n);
+        if (expected > 0 && j.length() != expected)
+            throw new IllegalArgumentException("Unexpected array length");
+        final byte[] data = new byte[j.length()];
+        for (int i = 0; i < j.length(); ++i)
+            data[i] = (byte)j.getInt(i);
+        return data;
+    }
+
+    // Convert a private key to a BIP 38 key
+    private boolean encrypt(final JSONArray args, final CallbackContext cb) throws JSONException {
+
+        final byte[] pk = getBytes(args, 0, 32);
+        final String pwd = args.getString(1);
+        final String coin = args.getString(2);
+        final long flags;
+        final Runnable task;
+
+        if (coin.equals("BTC"))
+            flags = BIP38_KEY_COMPRESSED | BIP38_KEY_MAINNET;
+        else if (coin.equals("BTT"))
+            flags = BIP38_KEY_COMPRESSED | BIP38_KEY_TESTNET;
+        else {
+            BIP38.setError(cb, "InvalidNetwork");
+            return true;
+        }
+
+        task = new Runnable() {
+                   public void run() {
+                       try {
+                           final byte[] pass = pwd.getBytes("UTF-8");
+                           BIP38.setString(cb, Wally.bip38_from_private_key(pk, pass, flags));
+                       } catch (Throwable e) {
+                           BIP38.setError(cb, e);
+                       }
+                   }
+        };
+
+        runAsync(task);
+        return true;
+    }
+
+    // Convert a private key to a raw, truncated BIP 38 key
+    private boolean encrypt_raw(final JSONArray args, final CallbackContext cb) throws JSONException {
+
+        final long flags = BIP38_KEY_COMPRESSED | BIP38_KEY_RAW_MODE | BIP38_KEY_SWAP_ORDER;
+        final byte[] pk = getBytes(args, 0, 32);
+        final String pwd = args.getString(1);
+        final Runnable task;
+
+        // We skip the first 3 bytes to return a 36 byte block. When we
+        // reconstruct the block we will hard code these bytes back in.
+        // This works as we always use compressed keys so version/flags
+        // are constant.
+        task = new Runnable() {
+                   public void run() {
+                       try {
+                           final byte[] pass = pwd.getBytes("UTF-8");
+                           final byte[] raw = Wally.bip38_raw_from_private_key(pk, pass, flags, null);
+                           BIP38.setBytes(cb, raw, 3, raw.length);
+                       } catch (Throwable e) {
+                           BIP38.setError(cb, e);
+                       }
+                   }
+        };
+
+        runAsync(task);
+        return true;
+    }
+
+    // Convert a BIP 38 key to a private key
+    private boolean decrypt(final JSONArray args, final CallbackContext cb) throws JSONException {
+
+        final String b58 = args.getString(0);
+        final String pwd = args.getString(1);
+        final String coin = args.getString(2);
+        final long flags;
+        final Runnable task;
+
+        if (coin.equals("BTC"))
+            flags = BIP38_KEY_COMPRESSED | BIP38_KEY_MAINNET;
+        else if (coin.equals("BTT"))
+            flags = BIP38_KEY_COMPRESSED | BIP38_KEY_TESTNET;
+        else {
+            BIP38.setError(cb, "InvalidNetwork");
+            return true;
+        }
+
+        task = new Runnable() {
+                   public void run() {
+                       try {
+                           final byte[] pass = pwd.getBytes("UTF-8");
+                           final byte[] pk = Wally.bip38_to_private_key(b58, pass, flags, null);
+                           BIP38.setBytes(cb, pk, 0, pk.length);
+                       } catch (Throwable e) {
+                           BIP38.setError(cb, e);
+                       }
+                   }
+        };
+
+        runAsync(task);
+        return true;
+    }
+
+    // Convert a raw, truncated BIP 38 key to a private key
+    private boolean decrypt_raw(final JSONArray args, final CallbackContext cb) throws JSONException {
+
+        final JSONArray j = args.getJSONArray(0);
+        final byte[] data = new byte[BIP38_SERIALISED_LEN];
+        // Reconstruct our original 39 byte block
+        data[0] = (byte)0x01; // Version
+        data[1] = (byte)0x42; // Non-EC Multiplied
+        data[2] = (byte)0xE0; // Flags normal, compressed
+        for (int i = 0; i < data.length - 3; ++i)
+           data[i + 3] = (byte)j.getInt(i);
+        final String pwd = args.getString(1);
+
+        final long flags = BIP38_KEY_COMPRESSED | BIP38_KEY_RAW_MODE | BIP38_KEY_SWAP_ORDER;
+        final Runnable task;
+
+        task = new Runnable() {
+                   public void run() {
+                       try {
+                           final byte[] pass = pwd.getBytes("UTF-8");
+                           final byte[] pk = Wally.bip38_raw_to_private_key(data, pass, flags, null);
+                           BIP38.setBytes(cb, pk, 0, pk.length);
+                       } catch (Throwable e) {
+                           BIP38.setError(cb, e);
+                       }
+                   }
+        };
+
+        runAsync(task);
+        return true;
+    }
+
+    private boolean calcSeed(final JSONArray args, final CallbackContext cb) throws JSONException {
+
+        final String password = args.getString(0);
+        final String mnemonic = args.getString(1);
+        final Runnable task;
+
+        task = new Runnable() {
+                   public void run() {
+                       try {
+                           final byte[] p = password.getBytes("UTF-8");
+                           final byte[] m = mnemonic.getBytes("UTF-8");
+                           final byte[] seed = Wally.pbkdf2_hmac_sha512(m, p, 0, 2048, null);
+                           BIP38.setBytes(cb, seed, 0, seed.length);
+                       } catch (Throwable e) {
+                           BIP38.setError(cb, e);
+                       }
+                  }
+        };
+
+        runAsync(task);
+        return true;
     }
 
     @Override
-    public boolean execute(final String action, final JSONArray args, final CallbackContext callbackContext) throws JSONException {
+    public boolean execute(final String action, final JSONArray args, final CallbackContext cb) throws JSONException {
         if ("encrypt".equals(action)) {
-            final JSONArray key_json = args.getJSONArray(0);
-            final byte[] key = new byte[32];
-            for (int i = 0; i < 32; ++i) key[i] = (byte)key_json.getInt(i);
-            
-            final String password = args.getString(1);
-            final String cur_coin = args.getString(2);
-            final Network network = coinToNetwork(cur_coin, callbackContext);
-            if (network == null) return true;
-            
-            cordova.getThreadPool().execute(new Runnable() {
-                public void run() {
-                    final ECKeyPair keyPair;
-                    try {
-                        keyPair = new ECKeyPair(key, true);  // compressed=true
-                    } catch(final ValidationException e) {
-                        final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "ValidationException");
-                        callbackContext.sendPluginResult(result);
-                        return;
-                    }
-
-                    final KeyFormatter kf = new KeyFormatter(password, network);
-                    final String serializedKey;
-                    try {
-                        serializedKey = kf.serializeKey(keyPair);
-                    } catch(final ValidationException e) {
-                        final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "ValidationException");
-                        callbackContext.sendPluginResult(result);
-                        return;
-                    }
-                    PluginResult result = new PluginResult(PluginResult.Status.OK, serializedKey);
-                    callbackContext.sendPluginResult(result);
-                }
-            });
-            return true;
+            return encrypt(args, cb);
         } else if ("decrypt".equals(action)) {
-            final String b58 = args.getString(0);
-            final String password = args.getString(1);
-            final String cur_coin = args.getString(2);
-            final Network network = coinToNetwork(cur_coin, callbackContext);
-            if (network == null) return true;
-
-            cordova.getThreadPool().execute(new Runnable() {
-                public void run() {
-                    final KeyFormatter kf = new KeyFormatter(password, network);
-                    final ECKeyPair keyPair;
-                    try {
-                        keyPair = kf.parseSerializedKey(b58);
-                    } catch(final ValidationException e) {
-                        final String message;
-                        if (e.getMessage().equals("invalid key")) message = "invalid_privkey";
-                        else if (e.getMessage().equals("checksum mismatch")) message = "invalid_privkey";
-                        // decrpyt typo in com.bitsofproof.supernode.wallet.KeyFormatter
-                        else if (e.getMessage().equals("failed to decrpyt")) message = "invalid_passphrase";
-                        else message = e.getMessage();
-                        final PluginResult result = new PluginResult(PluginResult.Status.ERROR, message);
-                        callbackContext.sendPluginResult(result);
-                        return;
-                    }
-                    PluginResult result = new PluginResult(PluginResult.Status.OK, keyPair.toString());
-                    callbackContext.sendPluginResult(result);
-                }
-            });
-            return true;
+            return decrypt(args, cb);
         } else if ("encrypt_raw".equals(action)) {
-            final JSONArray data_json = args.getJSONArray(0);
-            final byte[] data = new byte[32];
-            for (int i = 0; i < 32; ++i) data[i] = (byte)data_json.getInt(i);
-            final String password = args.getString(1);
-
-            cordova.getThreadPool().execute(new Runnable() {
-                public void run() {
-                    byte[] hash = Hash.hash(data), salt = new byte[4];
-                    System.arraycopy (hash, 0, salt, 0, 4);
-                    byte[] encrypted;
-                    try {
-                        byte[] derived;
-                        derived = SCrypt.scrypt(password.getBytes("UTF-8"), salt, 16384, 8, 8, 64);
-                        byte[] key = new byte[32];
-                        System.arraycopy (derived, 32, key, 0, 32);
-                        SecretKeySpec keyspec = new SecretKeySpec (key, "AES");
-                        Cipher cipher = Cipher.getInstance ("AES/ECB/NoPadding", "BC");
-                        cipher.init (Cipher.ENCRYPT_MODE, keyspec);
-                        for ( int i = 0; i < 32; ++i )
-                        {
-                            data[i] ^= derived[i];
-                        }
-                        encrypted = cipher.doFinal (data, 0, 32);
-                    } catch ( NoSuchPaddingException e ) {
-                        final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "no such padding");
-                        callbackContext.sendPluginResult(result);
-                        return;
-                    } catch ( InvalidKeyException e ) {
-                        final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "invalid key");
-                        callbackContext.sendPluginResult(result);
-                        return;
-                    } catch ( IllegalBlockSizeException e ) {
-                        final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "illegal block size");
-                        callbackContext.sendPluginResult(result);
-                        return;
-                    } catch ( UnsupportedEncodingException e ) { 
-                        final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "unsupported encoding");
-                        callbackContext.sendPluginResult(result);
-                        return;
-                    } catch ( NoSuchAlgorithmException e ) { 
-                        final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "no such algorithm");
-                        callbackContext.sendPluginResult(result);
-                        return;
-                    } catch ( BadPaddingException e ) { 
-                        final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "bad padding");
-                        callbackContext.sendPluginResult(result);
-                        return;
-                    } catch ( GeneralSecurityException e ) { 
-                        final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "general security exception");
-                        callbackContext.sendPluginResult(result);
-                        return;
-                    }
-
-                    final JSONArray json = new JSONArray();
-                    byte[] result_bytes = new byte[36];
-                    System.arraycopy (encrypted, 0, result_bytes, 0, 32);
-                    System.arraycopy (salt, 0, result_bytes, 32, 4);
-                    for (int i = 0; i < 36; i++) {
-                        int ubyte = result_bytes[i];
-                        ubyte &= 0xFF;
-                        json.put(ubyte);
-                    }
-                    PluginResult result = new PluginResult(PluginResult.Status.OK, json);
-                    callbackContext.sendPluginResult(result);            
-                }
-            });
-
-            return true;
+            return encrypt_raw(args, cb);
         } else if ("decrypt_raw".equals(action)) {
-            final JSONArray data_json = args.getJSONArray(0);
-            final byte[] data = new byte[36];
-            for (int i = 0; i < 36; ++i) data[i] = (byte)data_json.getInt(i);
-            final String password = args.getString(1);
-
-            cordova.getThreadPool().execute(new Runnable() {
-                public void run() {
-                    byte[] salt = new byte[4];
-                    System.arraycopy (data, 32, salt, 0, 4);
-                    byte[] derived, decrypted;
-                    try {
-                        derived = SCrypt.scrypt(password.getBytes("UTF-8"), salt, 16384, 8, 8, 64);
-                        byte[] key = new byte[32];
-                        System.arraycopy (derived, 32, key, 0, 32);
-                        SecretKeySpec keyspec = new SecretKeySpec (key, "AES");
-                        Cipher cipher = Cipher.getInstance ("AES/ECB/NoPadding", "BC");
-                        cipher.init (Cipher.DECRYPT_MODE, keyspec);
-                        decrypted = cipher.doFinal (data, 0, 32);
-                    } catch ( NoSuchPaddingException e ) {
-                        final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "no such padding");
-                        callbackContext.sendPluginResult(result);
-                        return;
-                    } catch ( InvalidKeyException e ) {
-                        final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "invalid key");
-                        callbackContext.sendPluginResult(result);
-                        return;
-                    } catch ( IllegalBlockSizeException e ) {
-                        final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "illegal block size");
-                        callbackContext.sendPluginResult(result);
-                        return;
-                    } catch ( UnsupportedEncodingException e ) { 
-                        final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "unsupported encoding");
-                        callbackContext.sendPluginResult(result);
-                        return;
-                    } catch ( NoSuchAlgorithmException e ) { 
-                        final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "no such algorithm");
-                        callbackContext.sendPluginResult(result);
-                        return;
-                    } catch ( BadPaddingException e ) { 
-                        final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "bad padding");
-                        callbackContext.sendPluginResult(result);
-                        return;
-                    } catch ( GeneralSecurityException e ) { 
-                        final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "general security exception");
-                        callbackContext.sendPluginResult(result);
-                        return;
-                    }
-                    for ( int i = 0; i < 32; ++i )
-                    {
-                        decrypted[i] ^= derived[i];
-                    }
-
-                    byte[] hash = Hash.hash(decrypted);
-                    for (int i = 0; i < 4; ++i) {
-                        if (hash[i] != salt[i]) {
-                            final PluginResult result = new PluginResult(PluginResult.Status.ERROR, "invalid password");
-                            callbackContext.sendPluginResult(result);
-                            return;
-                        }
-                    }
-
-                    final JSONArray json = new JSONArray();
-                    for (int i = 0; i < decrypted.length; i++) {
-                        int ubyte = decrypted[i];
-                        ubyte &= 0xFF;
-                        json.put(ubyte);
-                    }
-                    PluginResult result = new PluginResult(PluginResult.Status.OK, json);
-                    callbackContext.sendPluginResult(result);            
-                }
-            });
-
-            return true;
+            return decrypt_raw(args, cb);
+        } else if ("calcSeed".equals(action)) {
+            return calcSeed(args, cb);
         }
         return false;
     }
 }
-

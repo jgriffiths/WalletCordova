@@ -10,9 +10,6 @@
             <feature name="PINInput">
                 <param name="android-package" value="it.greenaddress.cordova.PINInput"/>
             </feature>
-            <feature name="BIP39">
-                <param name="android-package" value="it.greenaddress.cordova.BIP39"/>
-            </feature>
             <feature name="BIP38">
                 <param name="android-package" value="it.greenaddress.cordova.BIP38"/>
             </feature>
@@ -65,7 +62,6 @@
 
         <!-- sources -->
         <source-file src="BIP38.java" target-dir="src/it/greenaddress/cordova" />
-        <source-file src="BIP39.java" target-dir="src/it/greenaddress/cordova" />
         <source-file src="BTChip.java" target-dir="src/it/greenaddress/cordova" />
         <source-file src="GreenAddressIt.java" target-dir="src/it/greenaddress/cordova" />
         <source-file src="PINInput.java" target-dir="src/it/greenaddress/cordova" />
@@ -114,7 +110,11 @@
         <source-file src="libs/log4j-1.2.17.jar" target-dir="libs" />
         <source-file src="libs/slf4j-api-1.6.5.jar" target-dir="libs" />
         <source-file src="libs/slf4j-log4j12-1.6.6.jar" target-dir="libs" />
+        <source-file src="libs/wallycore.jar" target-dir="libs" />
+        <source-file src="libs/armeabi/libwallycore.so" target-dir="libs/armeabi" />
         <source-file src="libs/armeabi/libscrypt.so" target-dir="libs/armeabi" />
+        <source-file src="libs/armeabi-v7a/libwallycore.so" target-dir="libs/armeabi-v7a" />
+        <source-file src="libs/armeabi-v7a/libscrypt.so" target-dir="libs/armeabi-v7a" />
         <source-file src="libs/mips/libscrypt.so" target-dir="libs/mips" />
         <source-file src="libs/x86/libscrypt.so" target-dir="libs/x86" />
         <source-file src="libs/armeabi-v7a/libscrypt.so" target-dir="libs/armeabi-v7a" />
